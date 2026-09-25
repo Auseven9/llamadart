@@ -869,6 +869,80 @@ class LlamaEngine {
     }
   }
 
+  /// Forks the current context into [branchCount] parallel sequences and
+  /// generates up to [previewTokens] tokens on each from ONE shared
+  /// prompt-processing pass — cheaper than calling [generate] [branchCount]
+  /// separate times when you want several candidates to choose between
+  /// (e.g. scoring drafts and picking the best before showing anything).
+  ///
+  /// [prompt] is a raw, already-rendered prompt — same low-level contract
+  /// as [generate]. For chat-style messages, render them first via
+  /// [chatTemplate] and pass its `prompt` here.
+  ///
+  /// The branches are left on the context after this returns — call
+  /// [collapseBestOfNBranches] with the chosen winner's `seqId` before any
+  /// further generation on this context, or the unused branches leak KV
+  /// memory for the context's remaining lifetime.
+  ///
+  /// Throws [LlamaUnsupportedException] if the active backend doesn't
+  /// support best-of-N branching (currently: llama.cpp only).
+  Future<List<BestOfNBranchResult>> generateBestOfNPreview(
+    String prompt, {
+    GenerationParams params = const GenerationParams(),
+    required int branchCount,
+    required int previewTokens,
+    List<LlamaContentPart>? parts,
+  }) async {
+    _ensureReady();
+    await _rejectUnsupportedVideoInput(parts ?? const <LlamaContentPart>[]);
+    final candidate = backend;
+    if (candidate is! BackendBestOfNBranching) {
+      throw LlamaUnsupportedException(
+        'Best-of-N branching is not supported by the active backend.',
+      );
+    }
+    try {
+      return await (candidate as BackendBestOfNBranching)
+          .generateBestOfNPreview(
+            _contextHandle!,
+            prompt,
+            params,
+            branchCount,
+            previewTokens,
+            parts: parts,
+          );
+    } on LlamaException {
+      rethrow;
+    } catch (error, stackTrace) {
+      Error.throwWithStackTrace(
+        LlamaInferenceException('Best-of-N preview generation failed', error),
+        stackTrace,
+      );
+    }
+  }
+
+  /// Keeps [winnerSeqId]'s KV state as sequence 0 and discards the other
+  /// branches created by a prior [generateBestOfNPreview] call with the
+  /// same [branchCount]. Must be called before any further generation on
+  /// this context.
+  Future<void> collapseBestOfNBranches({
+    required int branchCount,
+    required int winnerSeqId,
+  }) async {
+    _ensureReady();
+    final candidate = backend;
+    if (candidate is! BackendBestOfNBranching) {
+      throw LlamaUnsupportedException(
+        'Best-of-N branching is not supported by the active backend.',
+      );
+    }
+    await (candidate as BackendBestOfNBranching).collapseBestOfNBranches(
+      _contextHandle!,
+      branchCount,
+      winnerSeqId,
+    );
+  }
+
   Stream<String> _generateNativeChat(
     BackendNativeChatGeneration nativeBackend,
     List<LlamaChatMessage> messages, {

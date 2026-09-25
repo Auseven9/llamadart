@@ -92,6 +92,73 @@ class GenerateRequest extends WorkerRequest {
   });
 }
 
+/// Request to fork a context into parallel branches and preview a short
+/// continuation on each — see [BackendBestOfNBranching].
+class BestOfNPreviewRequest extends WorkerRequest {
+  /// The handle of the context.
+  final int contextHandle;
+
+  /// The input prompt.
+  final String prompt;
+
+  /// Generation parameters.
+  final GenerationParams params;
+
+  /// How many parallel branches to fork.
+  final int branchCount;
+
+  /// How many tokens to generate on each branch.
+  final int previewTokens;
+
+  /// Address of the cancel token.
+  final int cancelTokenAddress;
+
+  /// Multimodal content parts.
+  final List<LlamaContentPart>? parts;
+
+  /// Creates a new [BestOfNPreviewRequest].
+  BestOfNPreviewRequest(
+    this.contextHandle,
+    this.prompt,
+    this.params,
+    this.branchCount,
+    this.previewTokens,
+    this.cancelTokenAddress,
+    super.sendPort, {
+    this.parts,
+  });
+}
+
+/// Response to a [BestOfNPreviewRequest].
+class BestOfNPreviewResponse {
+  /// Each branch's result.
+  final List<BestOfNBranchResult> branches;
+
+  /// Creates a new [BestOfNPreviewResponse].
+  BestOfNPreviewResponse(this.branches);
+}
+
+/// Request to collapse best-of-N branches back to a single sequence — see
+/// [BackendBestOfNBranching.collapseBestOfNBranches].
+class BestOfNCollapseRequest extends WorkerRequest {
+  /// The handle of the context.
+  final int contextHandle;
+
+  /// How many branches were forked.
+  final int branchCount;
+
+  /// The sequence id whose KV state should be kept as sequence 0.
+  final int winnerSeqId;
+
+  /// Creates a new [BestOfNCollapseRequest].
+  BestOfNCollapseRequest(
+    this.contextHandle,
+    this.branchCount,
+    this.winnerSeqId,
+    super.sendPort,
+  );
+}
+
 /// Request to generate an embedding vector.
 class EmbedRequest extends WorkerRequest {
   /// The handle of the context.
@@ -792,6 +859,11 @@ class PerformanceContextResponse {
   /// Time spent verifying speculative drafts in ms.
   final double? speculativeVerifyMs;
 
+  /// Average relative confidence (0.0-1.0) across this generation's sampled
+  /// tokens — see `LlamaCppService._runInferenceLoop`. Null when nothing
+  /// was generated, or generation ran through the speculative path.
+  final double? responseConfidence;
+
   /// Creates a new [PerformanceContextResponse].
   PerformanceContextResponse({
     required this.loadMs,
@@ -810,6 +882,7 @@ class PerformanceContextResponse {
     this.speculativeReplayTokens,
     this.speculativeDraftMs,
     this.speculativeVerifyMs,
+    this.responseConfidence,
   });
 }
 

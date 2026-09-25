@@ -29,6 +29,7 @@ class NativeLlamaBackend
         BackendModelFileTypeDiagnostics,
         BackendGpuEnumeration,
         BackendPerformanceDiagnostics,
+        BackendBestOfNBranching,
         BackendEmbeddings,
         BackendBatchEmbeddings,
         BackendStatePersistence,
@@ -718,12 +719,76 @@ class NativeLlamaBackend
         speculativeReplayTokens: res.speculativeReplayTokens,
         speculativeDraftMs: res.speculativeDraftMs,
         speculativeVerifyMs: res.speculativeVerifyMs,
+        responseConfidence: res.responseConfidence,
       );
     }
     if (res is ErrorResponse) {
       throw _workerError(res);
     }
     return null;
+  }
+
+  // Unlike generate()'s bridging method, this does not register its cancel
+  // token as _activeCancelToken — a caller cannot interrupt an in-flight
+  // preview via the shared cancelGeneration() entry point. Acceptable for
+  // now since previews are meant to be short and bounded by
+  // [previewTokens]; a future caller that needs mid-preview cancellation
+  // would need this wired into the same tracking generate() uses.
+  @override
+  Future<List<BestOfNBranchResult>> generateBestOfNPreview(
+    int contextHandle,
+    String prompt,
+    GenerationParams params,
+    int branchCount,
+    int previewTokens, {
+    List<LlamaContentPart>? parts,
+  }) async {
+    await _ensureIsolate();
+    final rp = ReceivePort();
+    final cancelToken = malloc<Int8>();
+    cancelToken.value = 0;
+    try {
+      _sendPort!.send(
+        BestOfNPreviewRequest(
+          contextHandle,
+          prompt,
+          params,
+          branchCount,
+          previewTokens,
+          cancelToken.address,
+          rp.sendPort,
+          parts: parts,
+        ),
+      );
+      final res = await rp.first;
+      if (res is BestOfNPreviewResponse) return res.branches;
+      if (res is ErrorResponse) throw _workerError(res);
+      return const [];
+    } finally {
+      rp.close();
+      malloc.free(cancelToken);
+    }
+  }
+
+  @override
+  Future<void> collapseBestOfNBranches(
+    int contextHandle,
+    int branchCount,
+    int winnerSeqId,
+  ) async {
+    await _ensureIsolate();
+    final rp = ReceivePort();
+    _sendPort!.send(
+      BestOfNCollapseRequest(
+        contextHandle,
+        branchCount,
+        winnerSeqId,
+        rp.sendPort,
+      ),
+    );
+    final res = await rp.first;
+    rp.close();
+    if (res is ErrorResponse) throw _workerError(res);
   }
 
   @override

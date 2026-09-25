@@ -607,6 +607,19 @@ class BackendPerfContextData {
     return acceptedDraftTokens / draftTokens;
   }
 
+  /// Average relative confidence (0.0-1.0) across the generation's sampled
+  /// tokens — for each token, how much probability mass the model's raw
+  /// output distribution put on the token that was actually sampled,
+  /// relative to that step's own top choice. 1.0 means every sampled token
+  /// was the model's own argmax; lower values mean sampling (temperature,
+  /// top-p/top-k) picked tokens the model itself considered less likely.
+  /// Not a calibrated probability of the response being *correct* — it
+  /// reflects how much the sampler diverged from the model's mode, nothing
+  /// about factual accuracy. Only the llama.cpp backend populates this
+  /// today, and only for the non-speculative decoding path; null
+  /// otherwise.
+  final double? responseConfidence;
+
   /// Creates a new [BackendPerfContextData].
   const BackendPerfContextData({
     required this.loadMs,
@@ -625,6 +638,7 @@ class BackendPerfContextData {
     this.speculativeReplayTokens,
     this.speculativeDraftMs,
     this.speculativeVerifyMs,
+    this.responseConfidence,
   });
 }
 
@@ -632,6 +646,60 @@ class BackendPerfContextData {
 abstract class BackendPerformanceDiagnostics {
   /// Returns current native perf timings for [contextHandle] when available.
   Future<BackendPerfContextData?> getPerformanceContext(int contextHandle);
+}
+
+/// One branch's result from best-of-N preview generation — see
+/// [BackendBestOfNBranching].
+class BestOfNBranchResult {
+  /// This branch's internal sequence id (0..branchCount-1). Pass back to
+  /// [BackendBestOfNBranching.collapseBestOfNBranches] as `winnerSeqId` to
+  /// keep this branch's KV state and discard the rest.
+  final int seqId;
+
+  /// The text this branch generated during the preview.
+  final String text;
+
+  /// Average relative confidence (0.0-1.0) across this branch's tokens —
+  /// same signal as [BackendPerfContextData.responseConfidence], counted
+  /// only from the point branches actually diverged (every branch shares
+  /// an identical seed token/logits at the moment of forking). Null if
+  /// nothing was generated.
+  final double? confidence;
+
+  /// Creates a new [BestOfNBranchResult].
+  const BestOfNBranchResult({
+    required this.seqId,
+    required this.text,
+    this.confidence,
+  });
+}
+
+/// Optional backend capability for cheap multi-candidate generation: fork
+/// the context's current KV state into several parallel sequences, preview
+/// a short continuation on each from one shared prompt-processing pass,
+/// then collapse back down to a single chosen winner before continuing
+/// ordinary generation.
+abstract class BackendBestOfNBranching {
+  /// Forks [contextHandle] into [branchCount] sequences and generates up
+  /// to [previewTokens] tokens on each. Leaves the extra sequences on the
+  /// context afterward — call [collapseBestOfNBranches] with the chosen
+  /// winner before generating anything else on this context.
+  Future<List<BestOfNBranchResult>> generateBestOfNPreview(
+    int contextHandle,
+    String prompt,
+    GenerationParams params,
+    int branchCount,
+    int previewTokens, {
+    List<LlamaContentPart>? parts,
+  });
+
+  /// Keeps [winnerSeqId]'s KV state as sequence 0 and discards the other
+  /// [branchCount] - 1 branches created by [generateBestOfNPreview].
+  Future<void> collapseBestOfNBranches(
+    int contextHandle,
+    int branchCount,
+    int winnerSeqId,
+  );
 }
 
 /// Optional backend capability for generating text embeddings.

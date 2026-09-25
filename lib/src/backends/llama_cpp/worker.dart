@@ -273,6 +273,34 @@ void runLlamaWorkerForTesting(
             activeGenerate = generateFuture;
             await generateFuture;
 
+          case BestOfNPreviewRequest():
+            try {
+              final branches = service.generateBestOfNPreview(
+                message.contextHandle,
+                message.prompt,
+                message.params,
+                message.branchCount,
+                message.previewTokens,
+                message.cancelTokenAddress,
+                parts: message.parts,
+              );
+              message.sendPort.send(BestOfNPreviewResponse(branches));
+            } catch (error) {
+              message.sendPort.send(_toErrorResponse(error));
+            }
+
+          case BestOfNCollapseRequest():
+            try {
+              service.collapseBestOfNBranches(
+                message.contextHandle,
+                message.branchCount,
+                message.winnerSeqId,
+              );
+              message.sendPort.send(DoneResponse());
+            } catch (error) {
+              message.sendPort.send(_toErrorResponse(error));
+            }
+
           case TextToSpeechCapabilitiesRequest():
             final capabilities = service.textToSpeechCapabilities(
               message.contextHandle,
@@ -418,6 +446,7 @@ void runLlamaWorkerForTesting(
                 speculativeReplayTokens: perf.speculativeReplayTokens,
                 speculativeDraftMs: perf.speculativeDraftMs,
                 speculativeVerifyMs: perf.speculativeVerifyMs,
+                responseConfidence: perf.responseConfidence,
               ),
             );
 

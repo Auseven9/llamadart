@@ -4165,26 +4165,54 @@ class LlamaCppService {
   ///
   /// Returns a [Stream] of token bytes.
   /// Supports multimodal input via [parts].
-  Stream<List<int>> generate(
+  /// Shared setup for [generate] and [generateBestOfNPreview]: resolves
+  /// thinking-budget/speculative/grammar config, resets the context,
+  /// ingests the prompt, and initializes the sampler — the exact sequence
+  /// [generate] always ran inline. Extracted so best-of-N branching goes
+  /// through the same prompt-ingestion/grammar/thinking-budget handling
+  /// as ordinary generation, instead of a second hand-maintained copy that
+  /// could silently drift out of sync with it (multimodal input, a
+  /// grammar-constrained response, thinking-budget interaction — anything
+  /// this method already handles correctly and a naive copy might not).
+  ///
+  /// On success, the caller owns every native resource in the returned
+  /// record (tokensPtr, pieceBuf, grammarPtr, rootPtr, lazyGrammarConfig,
+  /// sampler, speculativeSession) and must free them itself, mirroring
+  /// [generate]'s own `finally` block — this method does not free them on
+  /// success, since ownership passes to the caller. On failure, it frees
+  /// whatever it had already allocated before rethrowing, so a caller that
+  /// never receives a return value has nothing left to clean up from this
+  /// call specifically (its own already-held resources, e.g. a refcount
+  /// increment made before calling this, are still the caller's to undo).
+  ({
+    _LlamaContextWrapper ctx,
+    llama_batch batch,
+    Pointer<llama_vocab> vocab,
+    Pointer<llama_sampler> sampler,
+    int initialTokens,
+    int nCtx,
+    Pointer<Int32> tokensPtr,
+    Pointer<Uint8> pieceBuf,
+    Pointer<Utf8> grammarPtr,
+    Pointer<Utf8> rootPtr,
+    _LazyGrammarConfig? lazyGrammarConfig,
+    Pointer<llama_dart_speculative> speculativeSession,
+    _SpeculativeApi? speculativeApi,
+    _LlamaCppSpeculativeConfig? speculativeConfig,
+    Set<int> preservedTokenIds,
+    List<String> effectiveStopSequences,
+    _LlamaCppThinkingBudgetConfig? thinkingBudgetConfig,
+    _ReasoningBudgetApi? reasoningBudgetApi,
+  })
+  _prepareGeneration(
     int contextHandle,
+    _LlamaContextWrapper ctxIn,
     String prompt,
     GenerationParams params,
     int cancelTokenAddress, {
     List<LlamaContentPart>? parts,
-  }) async* {
-    var ctx = _contexts[contextHandle];
-    if (ctx == null) throw Exception("Invalid context handle");
-    if (_activeTtsContextHandle == contextHandle) {
-      throw LlamaStateException(
-        'Cannot generate text while text-to-speech is active on this context.',
-      );
-    }
-    _generatingContexts.update(
-      contextHandle,
-      (count) => count + 1,
-      ifAbsent: () => 1,
-    );
-
+  }) {
+    var ctx = ctxIn;
     Pointer<Int32> tokensPtr = nullptr;
     Pointer<Uint8> pieceBuf = nullptr;
     Pointer<Utf8> grammarPtr = nullptr;
@@ -4343,7 +4371,7 @@ class LlamaCppService {
         );
       }
 
-      // 4. Initialize and Run Sampler Loop
+      // 4. Initialize Sampler
       sampler = _initializeSampler(
         params,
         vocab,
@@ -4366,6 +4394,103 @@ class LlamaCppService {
         params.stopSequences,
         params.preservedTokens,
       );
+
+      return (
+        ctx: ctx,
+        batch: batch,
+        vocab: vocab,
+        sampler: sampler,
+        initialTokens: initialTokens,
+        nCtx: nCtx,
+        tokensPtr: tokensPtr,
+        pieceBuf: pieceBuf,
+        grammarPtr: grammarPtr,
+        rootPtr: rootPtr,
+        lazyGrammarConfig: lazyGrammarConfig,
+        speculativeSession: speculativeSession,
+        speculativeApi: speculativeApi,
+        speculativeConfig: speculativeConfig,
+        preservedTokenIds: preservedTokenIds,
+        effectiveStopSequences: effectiveStopSequences,
+        thinkingBudgetConfig: thinkingBudgetConfig,
+        reasoningBudgetApi: reasoningBudgetApi,
+      );
+    } catch (e) {
+      // Mirrors generate()'s own finally block, for whatever this call got
+      // through before failing — this method's caller never receives a
+      // return value on this path, so nothing here is double-freed by a
+      // caller-side cleanup afterward.
+      if (speculativeSession != nullptr) {
+        speculativeApi?.free(speculativeSession);
+      }
+      if (sampler != nullptr) llama_sampler_free(sampler);
+      if (tokensPtr != nullptr) malloc.free(tokensPtr);
+      if (pieceBuf != nullptr) malloc.free(pieceBuf);
+      if (grammarPtr != nullptr) malloc.free(grammarPtr);
+      if (rootPtr != nullptr) malloc.free(rootPtr);
+      lazyGrammarConfig?.dispose();
+      rethrow;
+    }
+  }
+
+  /// Streams generated tokens for [prompt] on [contextHandle], choosing
+  /// the speculative or ordinary inference loop based on [params]. Setup
+  /// (prompt ingestion, sampler/grammar/thinking-budget init) is shared
+  /// with [generateBestOfNPreview] via [_prepareGeneration].
+  Stream<List<int>> generate(
+    int contextHandle,
+    String prompt,
+    GenerationParams params,
+    int cancelTokenAddress, {
+    List<LlamaContentPart>? parts,
+  }) async* {
+    var ctx = _contexts[contextHandle];
+    if (ctx == null) throw Exception("Invalid context handle");
+    if (_activeTtsContextHandle == contextHandle) {
+      throw LlamaStateException(
+        'Cannot generate text while text-to-speech is active on this context.',
+      );
+    }
+    _generatingContexts.update(
+      contextHandle,
+      (count) => count + 1,
+      ifAbsent: () => 1,
+    );
+
+    Pointer<Int32> tokensPtr = nullptr;
+    Pointer<Uint8> pieceBuf = nullptr;
+    Pointer<Utf8> grammarPtr = nullptr;
+    Pointer<Utf8> rootPtr = nullptr;
+    _LazyGrammarConfig? lazyGrammarConfig;
+    Pointer<llama_sampler> sampler = nullptr;
+    Pointer<llama_dart_speculative> speculativeSession = nullptr;
+    _SpeculativeApi? speculativeApi;
+
+    try {
+      final prepared = _prepareGeneration(
+        contextHandle,
+        ctx,
+        prompt,
+        params,
+        cancelTokenAddress,
+        parts: parts,
+      );
+      ctx = prepared.ctx;
+      tokensPtr = prepared.tokensPtr;
+      pieceBuf = prepared.pieceBuf;
+      grammarPtr = prepared.grammarPtr;
+      rootPtr = prepared.rootPtr;
+      lazyGrammarConfig = prepared.lazyGrammarConfig;
+      sampler = prepared.sampler;
+      speculativeSession = prepared.speculativeSession;
+      speculativeApi = prepared.speculativeApi;
+      final batch = prepared.batch;
+      final vocab = prepared.vocab;
+      final initialTokens = prepared.initialTokens;
+      final nCtx = prepared.nCtx;
+      final speculativeConfig = prepared.speculativeConfig;
+      final preservedTokenIds = prepared.preservedTokenIds;
+      final effectiveStopSequences = prepared.effectiveStopSequences;
 
       if (speculativeSession != nullptr && speculativeConfig != null) {
         yield* _runSpeculativeInferenceLoop(
@@ -5528,6 +5653,8 @@ class LlamaCppService {
     var sampleMicros = 0;
     var evalMicros = 0;
     var generatedTokens = 0;
+    var confidenceSum = 0.0;
+    var confidenceCount = 0;
 
     for (int i = 0; i < params.maxTokens; i++) {
       if (cancelToken.value == 1) break;
@@ -5538,6 +5665,35 @@ class LlamaCppService {
       sampleTick.stop();
       sampleMicros += sampleTick.elapsedMicroseconds;
       if (llama_vocab_is_eog(vocab, selectedToken)) break;
+
+      // Real per-token confidence: how much probability mass the raw model
+      // distribution put on the token that got sampled, relative to its
+      // own top choice (1.0 == the sampler picked the model's own
+      // argmax; smaller values mean sampling picked something the model
+      // itself considered less likely). Read straight from the logits
+      // buffer llama_sampler_sample just consumed for THIS step — before
+      // the decode call below overwrites it with the next position's
+      // values, and independent of whatever transformations (temperature,
+      // top-p/top-k, repeat penalty) the sampler chain applied on top of
+      // the raw distribution to make its pick. A single pass over a
+      // Float32List view is cheap relative to decode itself; skip it
+      // silently if the backend has no logits for this position (e.g. mid
+      // multimodal decode) rather than throwing.
+      final logitsPtr = llama_get_logits_ith(ctx.pointer, -1);
+      if (logitsPtr != nullptr) {
+        final nVocab = llama_vocab_n_tokens(vocab);
+        if (selectedToken >= 0 && selectedToken < nVocab) {
+          final logits = logitsPtr.asTypedList(nVocab);
+          var maxLogit = double.negativeInfinity;
+          for (final l in logits) {
+            if (l > maxLogit) maxLogit = l;
+          }
+          if (maxLogit.isFinite) {
+            confidenceSum += math.exp(logits[selectedToken] - maxLogit);
+            confidenceCount++;
+          }
+        }
+      }
 
       final pieceTick = Stopwatch()..start();
       final n = llama_token_to_piece(
@@ -5582,6 +5738,289 @@ class LlamaCppService {
     ctx.lastPerfDecodeMs = evalMicros / 1000.0;
     ctx.lastPerfEvalTokens = generatedTokens;
     ctx.lastPerfSampleCount = generatedTokens;
+    ctx.lastResponseConfidence = confidenceCount > 0
+        ? confidenceSum / confidenceCount
+        : null;
+  }
+
+  /// Forks [contextHandle]'s current KV state into [branchCount] parallel
+  /// sequences and generates up to [previewTokens] tokens on each in
+  /// lockstep (one batched `llama_decode` call per round, covering every
+  /// branch at once) — a way to get several candidate continuations from
+  /// ONE prompt-processing pass instead of paying for it [branchCount]
+  /// times over. Uses [_prepareGeneration] for setup, so branches get the
+  /// exact same grammar/thinking-budget/penalty handling ordinary
+  /// generation does.
+  ///
+  /// The branch that samples the seed token (round 0) shares identical
+  /// logits and KV state across every branch — nothing has diverged yet,
+  /// so that token isn't counted toward [BestOfNBranchResult.confidence].
+  /// Only tokens generated after the branches actually diverge are.
+  ///
+  /// Leaves the extra sequences (1..branchCount-1) on this context after
+  /// returning — call [collapseBestOfNBranches] with the chosen winner
+  /// before generating anything else on this context, or they leak KV
+  /// memory for the context's remaining lifetime.
+  ///
+  /// Does not support being combined with speculative decoding (no
+  /// draft/verify machinery here) or a stop-sequence cutoff (previews are
+  /// meant to be short and bounded by [previewTokens] already) — throws
+  /// [LlamaUnsupportedException] for the former; the latter is simply not
+  /// checked, so a branch can run past where a real generation call would
+  /// have stopped early on a matched stop sequence.
+  List<BestOfNBranchResult> generateBestOfNPreview(
+    int contextHandle,
+    String prompt,
+    GenerationParams params,
+    int branchCount,
+    int previewTokens,
+    int cancelTokenAddress, {
+    List<LlamaContentPart>? parts,
+  }) {
+    if (branchCount < 1) {
+      throw ArgumentError.value(branchCount, 'branchCount', 'must be >= 1');
+    }
+    if (previewTokens < 1) {
+      throw ArgumentError.value(previewTokens, 'previewTokens', 'must be >= 1');
+    }
+
+    final ctx0 = _contexts[contextHandle];
+    if (ctx0 == null) throw Exception("Invalid context handle");
+    if (_activeTtsContextHandle == contextHandle) {
+      throw LlamaStateException(
+        'Cannot generate text while text-to-speech is active on this context.',
+      );
+    }
+    _generatingContexts.update(
+      contextHandle,
+      (count) => count + 1,
+      ifAbsent: () => 1,
+    );
+
+    Pointer<Int32> tokensPtr = nullptr;
+    Pointer<Uint8> pieceBuf = nullptr;
+    Pointer<Utf8> grammarPtr = nullptr;
+    Pointer<Utf8> rootPtr = nullptr;
+    _LazyGrammarConfig? lazyGrammarConfig;
+    Pointer<llama_dart_speculative> speculativeSession = nullptr;
+    _SpeculativeApi? speculativeApi;
+    final samplers = <Pointer<llama_sampler>>[];
+
+    try {
+      final prepared = _prepareGeneration(
+        contextHandle,
+        ctx0,
+        prompt,
+        params,
+        cancelTokenAddress,
+        parts: parts,
+      );
+      tokensPtr = prepared.tokensPtr;
+      pieceBuf = prepared.pieceBuf;
+      grammarPtr = prepared.grammarPtr;
+      rootPtr = prepared.rootPtr;
+      lazyGrammarConfig = prepared.lazyGrammarConfig;
+      speculativeSession = prepared.speculativeSession;
+      speculativeApi = prepared.speculativeApi;
+      samplers.add(prepared.sampler);
+
+      if (speculativeSession != nullptr) {
+        throw LlamaUnsupportedException(
+          'Speculative decoding cannot be combined with best-of-N '
+          'branching (no draft/verify machinery in the branching loop) — '
+          'disable one or the other for this call.',
+        );
+      }
+
+      final ctx = prepared.ctx;
+      final vocab = prepared.vocab;
+      final batch = prepared.batch;
+      final nCtx = prepared.nCtx;
+      final initialTokens = prepared.initialTokens;
+      final modelHandle = _contextToModel[contextHandle]!;
+      final model = _models[modelHandle]!;
+
+      final maxSeq = llama_n_seq_max(ctx.pointer);
+      if (branchCount > maxSeq) {
+        throw LlamaUnsupportedException(
+          'This context supports at most $maxSeq parallel sequences '
+          '(requested $branchCount branches) — reload with a larger '
+          'sequence count, or request fewer branches.',
+        );
+      }
+      final batchCapacity = math.max(1, llama_n_batch(ctx.pointer));
+      if (branchCount > batchCapacity) {
+        throw LlamaUnsupportedException(
+          'This context\'s batch size ($batchCapacity) is smaller than '
+          'the requested branch count ($branchCount).',
+        );
+      }
+
+      // Fork sequence 0 (already holding the processed prompt) into
+      // branchCount-1 additional sequences with identical KV state.
+      final memory = llama_get_memory(ctx.pointer);
+      for (var k = 1; k < branchCount; k++) {
+        llama_memory_seq_cp(memory, 0, k, -1, -1);
+      }
+
+      // One sampler per branch, built identically to how _prepareGeneration
+      // built the first — same grammar/penalty/thinking-budget behavior on
+      // every branch, just independent stochastic state so branches
+      // actually diverge instead of producing identical text.
+      for (var k = 1; k < branchCount; k++) {
+        samplers.add(
+          _initializeSampler(
+            params,
+            vocab,
+            model.vocabSize,
+            model.suppressedTokens,
+            grammarPtr,
+            rootPtr,
+            lazyGrammarConfig,
+            prepared.thinkingBudgetConfig,
+            prepared.reasoningBudgetApi,
+            initialTokens,
+            tokensPtr,
+          ),
+        );
+      }
+
+      final branchBytes = List.generate(branchCount, (_) => BytesBuilder());
+      final confidenceSum = List<double>.filled(branchCount, 0.0);
+      final confidenceCount = List<int>.filled(branchCount, 0);
+      final stopped = List<bool>.filled(branchCount, false);
+      final cancelToken = Pointer<Int8>.fromAddress(cancelTokenAddress);
+      var currentPos = initialTokens;
+
+      // Round 0 seed: every branch still shares identical KV state and
+      // logits at this point (the fork above copied state, it didn't run
+      // any divergent computation), so this is one shared distribution
+      // sampled K independent times — the point where branches start to
+      // actually differ.
+      var roundTokens = [
+        for (final s in samplers) llama_sampler_sample(s, ctx.pointer, -1),
+      ];
+
+      for (var round = 0; round < previewTokens; round++) {
+        if (cancelToken.value == 1) break;
+        if (currentPos >= nCtx) break;
+        if (stopped.every((s) => s)) break;
+
+        batch.n_tokens = branchCount;
+        for (var k = 0; k < branchCount; k++) {
+          final tok = roundTokens[k];
+          if (!stopped[k]) {
+            if (llama_vocab_is_eog(vocab, tok)) {
+              stopped[k] = true;
+            } else {
+              final n = llama_token_to_piece(
+                vocab,
+                tok,
+                pieceBuf.cast(),
+                256,
+                0,
+                false,
+              );
+              if (n > 0) branchBytes[k].add(pieceBuf.asTypedList(n));
+            }
+          }
+          batch.token[k] = tok;
+          batch.pos[k] = currentPos;
+          batch.n_seq_id[k] = 1;
+          batch.seq_id[k][0] = k;
+          batch.logits[k] = 1;
+        }
+
+        final decodeStatus = llama_decode(ctx.pointer, batch);
+        if (decodeStatus != 0) break;
+        currentPos++;
+
+        final nextTokens = <int>[];
+        for (var k = 0; k < branchCount; k++) {
+          if (stopped[k]) {
+            nextTokens.add(roundTokens[k]);
+            continue;
+          }
+          final logitsPtr = llama_get_logits_ith(ctx.pointer, k);
+          final nextToken = llama_sampler_sample(samplers[k], ctx.pointer, k);
+          if (logitsPtr != nullptr) {
+            final nVocab = llama_vocab_n_tokens(vocab);
+            if (nextToken >= 0 && nextToken < nVocab) {
+              final logits = logitsPtr.asTypedList(nVocab);
+              var maxLogit = double.negativeInfinity;
+              for (final l in logits) {
+                if (l > maxLogit) maxLogit = l;
+              }
+              if (maxLogit.isFinite) {
+                confidenceSum[k] += math.exp(logits[nextToken] - maxLogit);
+                confidenceCount[k]++;
+              }
+            }
+          }
+          nextTokens.add(nextToken);
+        }
+        roundTokens = nextTokens;
+      }
+
+      return List.generate(branchCount, (k) {
+        return BestOfNBranchResult(
+          seqId: k,
+          // allowMalformed since a preview can legitimately end mid-way
+          // through a multi-byte character at the previewTokens boundary
+          // — decoding the whole accumulated byte run at once (rather
+          // than per-token) still keeps every COMPLETE character intact;
+          // only a genuinely truncated trailing character degrades.
+          text: utf8.decode(branchBytes[k].takeBytes(), allowMalformed: true),
+          confidence: confidenceCount[k] > 0
+              ? confidenceSum[k] / confidenceCount[k]
+              : null,
+        );
+      });
+    } finally {
+      if (speculativeSession != nullptr) {
+        speculativeApi?.free(speculativeSession);
+      }
+      for (final s in samplers) {
+        if (s != nullptr) llama_sampler_free(s);
+      }
+      final remaining = (_generatingContexts[contextHandle] ?? 1) - 1;
+      if (remaining <= 0) {
+        _generatingContexts.remove(contextHandle);
+      } else {
+        _generatingContexts[contextHandle] = remaining;
+      }
+      if (tokensPtr != nullptr) malloc.free(tokensPtr);
+      if (pieceBuf != nullptr) malloc.free(pieceBuf);
+      if (grammarPtr != nullptr) malloc.free(grammarPtr);
+      if (rootPtr != nullptr) malloc.free(rootPtr);
+      lazyGrammarConfig?.dispose();
+    }
+  }
+
+  /// Collapses [branchCount] parallel branches created by
+  /// [generateBestOfNPreview] back down to a single sequence 0, keeping
+  /// [winnerSeqId]'s KV state and discarding the rest. Must be called
+  /// before any further generation on this context — the branches left
+  /// behind by [generateBestOfNPreview] otherwise leak KV memory for the
+  /// context's remaining lifetime.
+  void collapseBestOfNBranches(
+    int contextHandle,
+    int branchCount,
+    int winnerSeqId,
+  ) {
+    final ctx = _contexts[contextHandle];
+    if (ctx == null) throw Exception("Invalid context handle");
+    if (winnerSeqId < 0 || winnerSeqId >= branchCount) {
+      throw ArgumentError.value(winnerSeqId, 'winnerSeqId', 'out of range');
+    }
+    final memory = llama_get_memory(ctx.pointer);
+    if (winnerSeqId != 0) {
+      llama_memory_seq_rm(memory, 0, -1, -1);
+      llama_memory_seq_cp(memory, winnerSeqId, 0, -1, -1);
+    }
+    for (var k = 1; k < branchCount; k++) {
+      llama_memory_seq_rm(memory, k, -1, -1);
+    }
   }
 
   Stream<List<int>> _runSpeculativeInferenceLoop(
@@ -7491,6 +7930,7 @@ class LlamaCppService {
     int? speculativeReplayTokens,
     double? speculativeDraftMs,
     double? speculativeVerifyMs,
+    double? responseConfidence,
   })
   getPerformanceContext(int contextHandle) {
     final ctx = _contexts[contextHandle];
@@ -7558,6 +7998,7 @@ class LlamaCppService {
       speculativeReplayTokens: speculativeReplayTokens,
       speculativeDraftMs: speculativeDraftMs,
       speculativeVerifyMs: speculativeVerifyMs,
+      responseConfidence: ctx.lastResponseConfidence,
     );
   }
 
@@ -9116,6 +9557,13 @@ class _LlamaContextWrapper {
   int lastPerfSpeculativeVerifyTokens = 0;
   int lastPerfSpeculativeReplayTokens = 0;
   bool lastPerfSpeculativeRan = false;
+
+  /// Average relative confidence (0.0-1.0) across this generation's
+  /// sampled tokens — see [LlamaCppService._runInferenceLoop] for how it's
+  /// computed. Null when nothing was generated, or when generation ran
+  /// through the speculative path, which doesn't compute this yet.
+  double? lastResponseConfidence;
+
   _LlamaContextWrapper(this.pointer, this._modelKeepAlive);
   void resetLastPerf() {
     lastPerfPromptEvalMs = 0;
@@ -9133,6 +9581,7 @@ class _LlamaContextWrapper {
     lastPerfSpeculativeVerifyTokens = 0;
     lastPerfSpeculativeReplayTokens = 0;
     lastPerfSpeculativeRan = false;
+    lastResponseConfidence = null;
   }
 
   void dispose() {
