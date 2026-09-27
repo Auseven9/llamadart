@@ -1,5 +1,15 @@
 ## Unreleased
 
+- Add `GenerationParams.frequencyPenalty`, `mirostat`/`mirostatTau`/
+  `mirostatEta`, `logitBias`, `typicalP`, `xtcProbability`/`xtcThreshold`,
+  and `topNSigma` — native llama.cpp samplers (frequency penalty, Mirostat
+  1.0/2.0, logit bias, Locally Typical Sampling, XTC, and top-nσ) that were
+  already compiled into the native library and FFI-bound but never wired
+  into the sampler chain. Mirostat replaces the top-k/top-p/min-p/typical/
+  xtc/top-nσ pipeline entirely when enabled, matching upstream llama.cpp's
+  own CLI behavior. WebGPU and LiteRT-LM (native and web) explicitly reject
+  any of these left non-default, same as every other llama.cpp-only
+  sampler option.
 - Add an experimental `DecisionEngine` for Laya-style decision models (a
   ModernBERT encoder GGUF plus a safetensors head) on native llama.cpp, with
   typed `ChoiceKey`, `ScoreKey` and `NoulKey` questions

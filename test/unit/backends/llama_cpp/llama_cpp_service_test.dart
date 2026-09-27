@@ -1007,6 +1007,26 @@ void main() {
     );
   });
 
+  test('maps frequency penalty to the native penalty sampler', () {
+    final service = LlamaCppService();
+
+    expect(
+      service.debugResolvePenaltySamplerParamsForTesting(
+        const GenerationParams(
+          penalty: 1.0,
+          presencePenalty: 1.5,
+          frequencyPenalty: 0.8,
+        ),
+      ),
+      <String, Object>{
+        'lastN': 64,
+        'repeat': 1.0,
+        'frequency': 0.8,
+        'presence': 1.5,
+      },
+    );
+  });
+
   group('thinking-budget validation', () {
     test(
       'rejects a token budget that exceeds the native signed 32-bit limit',

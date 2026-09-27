@@ -1605,6 +1605,24 @@ class WebGpuLlamaBackend
     if (params.presencePenalty != 0.0) {
       throw UnsupportedError('WebGPU presence penalty is not supported yet.');
     }
+    if (params.frequencyPenalty != 0.0) {
+      throw UnsupportedError('WebGPU frequency penalty is not supported yet.');
+    }
+    if (params.mirostat != 0) {
+      throw UnsupportedError('WebGPU Mirostat is not supported yet.');
+    }
+    if (params.logitBias.isNotEmpty) {
+      throw UnsupportedError('WebGPU logit bias is not supported yet.');
+    }
+    if (params.typicalP != 1.0) {
+      throw UnsupportedError('WebGPU typical-P sampling is not supported yet.');
+    }
+    if (params.xtcProbability != 0.0) {
+      throw UnsupportedError('WebGPU XTC sampling is not supported yet.');
+    }
+    if (params.topNSigma >= 0) {
+      throw UnsupportedError('WebGPU top-nσ sampling is not supported yet.');
+    }
     if (params.thinkingBudget != null) {
       throw UnsupportedError(
         'WebGPU thinking-budget control is not supported yet.',

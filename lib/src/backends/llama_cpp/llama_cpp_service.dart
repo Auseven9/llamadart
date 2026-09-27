@@ -4097,7 +4097,7 @@ class LlamaCppService {
     return (
       lastN: 64,
       repeat: params.penalty,
-      frequency: 0.0,
+      frequency: params.frequencyPenalty,
       presence: params.presencePenalty,
     );
   }
@@ -5510,6 +5510,24 @@ class LlamaCppService {
       llama_sampler_chain_default_params(),
     );
 
+    // Per-token manual overrides (ban/force specific vocabulary ids) apply
+    // before anything else in the chain, same as upstream llama.cpp — a
+    // banned token should never even reach the repeat-penalty accounting
+    // below, let alone the later filtering stages.
+    if (params.logitBias.isNotEmpty) {
+      final logitBiasSampler = createLogitBiasSampler(
+        vocabSize,
+        params.logitBias,
+      );
+      if (logitBiasSampler == nullptr) {
+        llama_sampler_free(sampler);
+        throw LlamaInferenceException(
+          'llama.cpp failed to initialize the requested logit-bias sampler.',
+        );
+      }
+      llama_sampler_chain_add(sampler, logitBiasSampler);
+    }
+
     final penaltyConfig = _resolvePenaltySamplerConfig(params);
     final penaltiesSampler = llama_sampler_init_penalties(
       vocabSize,
@@ -5597,21 +5615,85 @@ class LlamaCppService {
       llama_sampler_chain_add(sampler, grammarSampler);
     }
 
-    llama_sampler_chain_add(sampler, llama_sampler_init_top_k(params.topK));
-    llama_sampler_chain_add(sampler, llama_sampler_init_top_p(params.topP, 1));
-    if (params.minP > 0) {
+    final seed = params.seed ?? DateTime.now().millisecondsSinceEpoch;
+
+    if (params.mirostat != 0) {
+      // Mirostat REPLACES the whole top-k/top-p/min-p/typical/xtc/top-nσ
+      // filtering pipeline with its own continuous feedback loop (it
+      // reads the model's raw, unfiltered logit distribution to judge
+      // surprise, so pre-truncating candidates would defeat the point) —
+      // same behavior as upstream llama.cpp's own CLI when --mirostat is
+      // set. Temperature is still applied first, same as upstream.
+      llama_sampler_chain_add(sampler, llama_sampler_init_temp(params.temp));
+      if (params.mirostat == 1) {
+        llama_sampler_chain_add(
+          sampler,
+          llama_sampler_init_mirostat(
+            vocabSize,
+            seed,
+            params.mirostatTau,
+            params.mirostatEta,
+            100,
+          ),
+        );
+      } else {
+        llama_sampler_chain_add(
+          sampler,
+          llama_sampler_init_mirostat_v2(
+            seed,
+            params.mirostatTau,
+            params.mirostatEta,
+          ),
+        );
+      }
+      // Mirostat's own sampler picks the final token itself — no separate
+      // dist/greedy stage follows it, matching upstream.
+    } else {
+      // Ordering matches upstream llama.cpp's default sampler chain
+      // ("penalties;dry;top_n_sigma;top_k;typical_p;top_p;min_p;xtc;temp",
+      // dry omitted here since it isn't wired up): each stage narrows the
+      // candidate pool a bit further before temperature/final selection.
+      if (params.topNSigma >= 0) {
+        llama_sampler_chain_add(
+          sampler,
+          llama_sampler_init_top_n_sigma(params.topNSigma),
+        );
+      }
+      llama_sampler_chain_add(sampler, llama_sampler_init_top_k(params.topK));
+      if (params.typicalP < 1.0) {
+        llama_sampler_chain_add(
+          sampler,
+          llama_sampler_init_typical(params.typicalP, 1),
+        );
+      }
       llama_sampler_chain_add(
         sampler,
-        llama_sampler_init_min_p(params.minP, 1),
+        llama_sampler_init_top_p(params.topP, 1),
       );
-    }
-    llama_sampler_chain_add(sampler, llama_sampler_init_temp(params.temp));
+      if (params.minP > 0) {
+        llama_sampler_chain_add(
+          sampler,
+          llama_sampler_init_min_p(params.minP, 1),
+        );
+      }
+      if (params.xtcProbability > 0) {
+        llama_sampler_chain_add(
+          sampler,
+          llama_sampler_init_xtc(
+            params.xtcProbability,
+            params.xtcThreshold,
+            1,
+            seed,
+          ),
+        );
+      }
+      llama_sampler_chain_add(sampler, llama_sampler_init_temp(params.temp));
 
-    if (params.temp <= 0) {
-      llama_sampler_chain_add(sampler, llama_sampler_init_greedy());
-    } else {
-      final seed = params.seed ?? DateTime.now().millisecondsSinceEpoch;
-      llama_sampler_chain_add(sampler, llama_sampler_init_dist(seed));
+      if (params.temp <= 0) {
+        llama_sampler_chain_add(sampler, llama_sampler_init_greedy());
+      } else {
+        llama_sampler_chain_add(sampler, llama_sampler_init_dist(seed));
+      }
     }
 
     if (grammarPtr == nullptr && tokensPtr != nullptr && initialTokens > 0) {

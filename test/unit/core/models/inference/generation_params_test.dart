@@ -2,12 +2,42 @@ import 'package:llamadart/src/core/models/inference/generation_params.dart';
 import 'package:test/test.dart';
 
 void main() {
+  test('GenerationParams defaults leave every advanced sampler disabled', () {
+    const params = GenerationParams();
+    expect(params.frequencyPenalty, 0.0);
+    expect(params.mirostat, 0);
+    expect(params.logitBias, isEmpty);
+    expect(params.typicalP, 1.0);
+    expect(params.xtcProbability, 0.0);
+    expect(params.topNSigma, -1.0);
+  });
+
+  test('GenerationParams rejects an out-of-range mirostat value', () {
+    expect(() => GenerationParams(mirostat: 3), throwsA(isA<AssertionError>()));
+    expect(() => GenerationParams(mirostat: -1), throwsA(isA<AssertionError>()));
+  });
+
+  test('GenerationParams accepts every valid mirostat value', () {
+    expect(() => const GenerationParams(mirostat: 0), returnsNormally);
+    expect(() => const GenerationParams(mirostat: 1), returnsNormally);
+    expect(() => const GenerationParams(mirostat: 2), returnsNormally);
+  });
+
   test('GenerationParams copyWith updates selected fields', () {
     const params = GenerationParams(temp: 0.5, maxTokens: 10);
     final updated = params.copyWith(
       topK: 12,
       minP: 0.05,
       presencePenalty: 1.5,
+      frequencyPenalty: 0.7,
+      mirostat: 2,
+      mirostatTau: 4.0,
+      mirostatEta: 0.05,
+      logitBias: const {42: double.negativeInfinity, 7: 3.0},
+      typicalP: 0.8,
+      xtcProbability: 0.3,
+      xtcThreshold: 0.15,
+      topNSigma: 1.5,
       grammarRoot: 'main',
       grammarLazy: true,
       thinkingBudget: const ThinkingBudget(
@@ -34,6 +64,15 @@ void main() {
     expect(updated.topK, 12);
     expect(updated.minP, 0.05);
     expect(updated.presencePenalty, 1.5);
+    expect(updated.frequencyPenalty, 0.7);
+    expect(updated.mirostat, 2);
+    expect(updated.mirostatTau, 4.0);
+    expect(updated.mirostatEta, 0.05);
+    expect(updated.logitBias, const {42: double.negativeInfinity, 7: 3.0});
+    expect(updated.typicalP, 0.8);
+    expect(updated.xtcProbability, 0.3);
+    expect(updated.xtcThreshold, 0.15);
+    expect(updated.topNSigma, 1.5);
     expect(updated.grammarRoot, 'main');
     expect(updated.grammarLazy, isTrue);
     expect(updated.thinkingBudget?.maxTokens, 64);

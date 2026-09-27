@@ -214,6 +214,44 @@ void main() {
     });
   });
 
+  group('createLogitBiasSampler', () {
+    test('returns nullptr for an empty bias map', () {
+      expect(createLogitBiasSampler(4, const {}), nullptr);
+    });
+
+    test('applies arbitrary positive and negative biases by token id', () {
+      final sampler = createLogitBiasSampler(4, const {1: double.negativeInfinity, 3: 2.5});
+      expect(sampler, isNot(nullptr));
+
+      final candidates = calloc<llama_token_data>(4);
+      final candidateArray = calloc<llama_token_data_array>();
+      try {
+        for (int i = 0; i < 4; i++) {
+          candidates[i]
+            ..id = i
+            ..logit = i.toDouble()
+            ..p = 0;
+        }
+        candidateArray.ref
+          ..data = candidates
+          ..size = 4
+          ..selected = -1
+          ..sorted = false;
+
+        llama_sampler_apply(sampler, candidateArray);
+
+        expect(candidates[0].logit, 0);
+        expect(candidates[1].logit, double.negativeInfinity);
+        expect(candidates[2].logit, 2);
+        expect(candidates[3].logit, 3 + 2.5);
+      } finally {
+        calloc.free(candidateArray);
+        calloc.free(candidates);
+        llama_sampler_free(sampler);
+      }
+    });
+  });
+
   group('readModelSuppressTokens', () {
     test('copies metadata once into an immutable Dart list', () {
       final nativeTokens = calloc<llama_token>(2);

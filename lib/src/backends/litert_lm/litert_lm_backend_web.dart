@@ -1139,6 +1139,24 @@ class LiteRtLmBackend
     if (params.presencePenalty != defaults.presencePenalty) {
       unsupported.add('presencePenalty');
     }
+    if (params.frequencyPenalty != defaults.frequencyPenalty) {
+      unsupported.add('frequencyPenalty');
+    }
+    if (params.mirostat != defaults.mirostat) {
+      unsupported.add('mirostat');
+    }
+    if (params.logitBias.isNotEmpty) {
+      unsupported.add('logitBias');
+    }
+    if (params.typicalP != defaults.typicalP) {
+      unsupported.add('typicalP');
+    }
+    if (params.xtcProbability != defaults.xtcProbability) {
+      unsupported.add('xtcProbability');
+    }
+    if (params.topNSigma != defaults.topNSigma) {
+      unsupported.add('topNSigma');
+    }
     if (params.grammar != null) {
       unsupported.add('grammar');
     }

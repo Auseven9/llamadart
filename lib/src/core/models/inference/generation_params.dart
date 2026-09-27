@@ -615,6 +615,77 @@ class GenerationParams {
   /// instead of silently ignoring them.
   final double presencePenalty;
 
+  /// Penalty applied to a token proportionally to how many times it has
+  /// already appeared in the sampler's recent history — a token repeated
+  /// five times is penalized five times as much as one seen once.
+  ///
+  /// Distinct from both [penalty] (a flat multiplicative discount applied
+  /// per occurrence, so the effect compounds geometrically rather than
+  /// linearly) and [presencePenalty] (a flat penalty applied once, the
+  /// SAME regardless of whether a token appeared once or fifty times).
+  /// `0.0` disables it. Maps to llama.cpp's `penalty_freq` sampler
+  /// parameter, applied by the same native penalties sampler as [penalty]
+  /// and [presencePenalty].
+  final double frequencyPenalty;
+
+  /// Selects the Mirostat sampling algorithm: `0` (default) uses the plain
+  /// top-k/top-p/min-p/temperature pipeline below; `1` enables Mirostat
+  /// 1.0; `2` enables Mirostat 2.0. When either Mirostat mode is active,
+  /// [topK], [topP], [minP], [typicalP], [xtcProbability], and
+  /// [topNSigma] are all bypassed entirely — Mirostat replaces that whole
+  /// filtering pipeline with its own per-token feedback loop that
+  /// continuously adjusts how aggressively it truncates candidates to hold
+  /// the text's perplexity near [mirostatTau]. [temp] is still applied
+  /// first, same as upstream llama.cpp.
+  final int mirostat;
+
+  /// Mirostat's target surprise/perplexity value (the paper's "tau") — how
+  /// unpredictable the generated text should feel. Lower keeps output safer
+  /// and more repetitive; higher allows more unexpected word choices.
+  /// Ignored unless [mirostat] is 1 or 2.
+  final double mirostatTau;
+
+  /// Mirostat's learning rate (the paper's "eta") for how quickly it
+  /// adjusts its internal truncation threshold toward [mirostatTau].
+  /// Ignored unless [mirostat] is 1 or 2.
+  final double mirostatEta;
+
+  /// Per-token logit adjustments, keyed by the model's own vocabulary
+  /// token id: a large negative value (e.g. `double.negativeInfinity`)
+  /// bans that exact token from ever being generated; a large positive
+  /// value makes it dramatically more likely. Empty disables this
+  /// entirely. Unlike every other field here, this operates on raw
+  /// vocabulary ids rather than text — a caller needs the loaded model's
+  /// own tokenizer to know which id corresponds to which token/word
+  /// fragment.
+  final Map<int, double> logitBias;
+
+  /// Locally Typical Sampling threshold — keeps only tokens whose
+  /// information content is close to the distribution's own average
+  /// ("locally typical"), which tends to prune both the most predictable
+  /// AND the most bizarre tokens rather than just cutting off a low-
+  /// probability tail the way top-p/top-k do. `1.0` (the default) disables
+  /// it entirely; lower values filter more aggressively.
+  final double typicalP;
+
+  /// XTC ("exclude top choices") sampling probability — with this
+  /// probability, XTC removes every token above [xtcThreshold] EXCEPT the
+  /// single least-likely surviving one, specifically to stop a model from
+  /// always taking the safest, most obvious next word and encourage more
+  /// varied phrasing. `0.0` (the default) disables it entirely.
+  final double xtcProbability;
+
+  /// Probability threshold above which a token becomes eligible for XTC to
+  /// remove — only relevant when [xtcProbability] is above `0.0`.
+  final double xtcThreshold;
+
+  /// Top-nσ sampling — keeps only tokens whose logit falls within [n]
+  /// standard deviations of the distribution's own mean logit, a
+  /// statistically-grounded alternative to top-k/top-p that recent
+  /// research found keeps a model reliably focused even at a high
+  /// [temp]. A negative value (the default, `-1.0`) disables it.
+  final double topNSigma;
+
   /// Random seed for the sampler.
   ///
   /// If null, a seed based on the current time will be used.
@@ -699,6 +770,15 @@ class GenerationParams {
     this.minP = 0.0,
     this.penalty = 1.1,
     this.presencePenalty = 0.0,
+    this.frequencyPenalty = 0.0,
+    this.mirostat = 0,
+    this.mirostatTau = 5.0,
+    this.mirostatEta = 0.1,
+    this.logitBias = const {},
+    this.typicalP = 1.0,
+    this.xtcProbability = 0.0,
+    this.xtcThreshold = 0.1,
+    this.topNSigma = -1.0,
     this.seed,
     this.stopSequences = const [],
     this.grammar,
@@ -712,7 +792,10 @@ class GenerationParams {
     this.reusePromptPrefix = defaultReusePromptPrefix,
     this.streamBatchTokenThreshold = defaultStreamBatchTokenThreshold,
     this.streamBatchByteThreshold = defaultStreamBatchByteThreshold,
-  });
+  }) : assert(
+         mirostat == 0 || mirostat == 1 || mirostat == 2,
+         'mirostat must be 0 (disabled), 1, or 2',
+       );
 
   /// Whether speculative decoding is requested by either public API shape.
   bool get isSpeculativeDecodingEnabled =>
@@ -737,6 +820,15 @@ class GenerationParams {
     double? minP,
     double? penalty,
     double? presencePenalty,
+    double? frequencyPenalty,
+    int? mirostat,
+    double? mirostatTau,
+    double? mirostatEta,
+    Map<int, double>? logitBias,
+    double? typicalP,
+    double? xtcProbability,
+    double? xtcThreshold,
+    double? topNSigma,
     int? seed,
     List<String>? stopSequences,
     String? grammar,
@@ -761,6 +853,15 @@ class GenerationParams {
       minP: minP ?? this.minP,
       penalty: penalty ?? this.penalty,
       presencePenalty: presencePenalty ?? this.presencePenalty,
+      frequencyPenalty: frequencyPenalty ?? this.frequencyPenalty,
+      mirostat: mirostat ?? this.mirostat,
+      mirostatTau: mirostatTau ?? this.mirostatTau,
+      mirostatEta: mirostatEta ?? this.mirostatEta,
+      logitBias: logitBias ?? this.logitBias,
+      typicalP: typicalP ?? this.typicalP,
+      xtcProbability: xtcProbability ?? this.xtcProbability,
+      xtcThreshold: xtcThreshold ?? this.xtcThreshold,
+      topNSigma: topNSigma ?? this.topNSigma,
       seed: seed ?? this.seed,
       stopSequences: stopSequences ?? this.stopSequences,
       grammar: grammar ?? this.grammar,

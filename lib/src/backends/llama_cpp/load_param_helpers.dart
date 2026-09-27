@@ -47,6 +47,35 @@ Pointer<llama_sampler> createSuppressTokensSampler(
   }
 }
 
+/// Creates a llama.cpp logit-bias sampler applying arbitrary [biases],
+/// keyed by vocabulary token id — the general form of
+/// [createSuppressTokensSampler] (which always biases toward
+/// `-infinity`), for [GenerationParams.logitBias].
+///
+/// The native sampler copies the bias entries before this function releases
+/// its temporary allocation. Returns `nullptr` when [biases] is empty.
+Pointer<llama_sampler> createLogitBiasSampler(
+  int vocabSize,
+  Map<int, double> biases,
+) {
+  if (biases.isEmpty) {
+    return nullptr;
+  }
+
+  final entries = biases.entries.toList(growable: false);
+  final biasArray = calloc<llama_logit_bias>(entries.length);
+  try {
+    for (int i = 0; i < entries.length; i++) {
+      biasArray[i]
+        ..token = entries[i].key
+        ..bias = entries[i].value;
+    }
+    return llama_sampler_init_logit_bias(vocabSize, entries.length, biasArray);
+  } finally {
+    calloc.free(biasArray);
+  }
+}
+
 /// Signature used to read model-defined suppress-token metadata from llama.cpp.
 typedef SuppressTokensGetter =
     Pointer<llama_token> Function(Pointer<llama_vocab>, Pointer<Int32>);

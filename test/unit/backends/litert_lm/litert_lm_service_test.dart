@@ -2987,6 +2987,12 @@ void main() {
           const GenerationParams(
             penalty: 1.0,
             presencePenalty: 1.5,
+            frequencyPenalty: 0.5,
+            mirostat: 2,
+            logitBias: {7: 3.0},
+            typicalP: 0.9,
+            xtcProbability: 0.2,
+            topNSigma: 1.0,
             grammarLazy: true,
             grammarTriggers: [
               GenerationGrammarTrigger(type: 0, value: '<tool_call>'),
@@ -3002,6 +3008,12 @@ void main() {
             allOf(
               contains('penalty'),
               contains('presencePenalty'),
+              contains('frequencyPenalty'),
+              contains('mirostat'),
+              contains('logitBias'),
+              contains('typicalP'),
+              contains('xtcProbability'),
+              contains('topNSigma'),
               contains('grammarLazy'),
               contains('grammarTriggers'),
               contains('preservedTokens'),
